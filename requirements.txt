@@ -1,0 +1,7 @@
+mcp[cli]
+biopython
+requests
+chromadb
+sentence-transformers
+networkx
+python-dotenv
