@@ -4,4 +4,8 @@ requests
 chromadb
 sentence-transformers
 networkx
+streamlit
+pandas
+plotly
 python-dotenv
+streamlit-agraph

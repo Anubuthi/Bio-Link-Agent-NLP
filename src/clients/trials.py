@@ -25,7 +25,7 @@ class TrialsClient:
                 
                 results.append({
                     "source": "ClinicalTrials.gov",
-                    "id": identity.get('nctId'),
+                    "nct_id": identity.get('nctId'),
                     "title": identity.get('briefTitle'),
                     "criteria": eligibility.get('eligibilityCriteria', ''),
                 })
