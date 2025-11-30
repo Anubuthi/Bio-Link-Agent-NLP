@@ -2,6 +2,8 @@ import chromadb
 from sentence_transformers import SentenceTransformer
 import os
 import shutil
+import sys
+
 
 class TrialVectorStore:
     def __init__(self):
@@ -9,7 +11,7 @@ class TrialVectorStore:
         Initialize the Vector Engine.
         Uses a Fresh Persistent Client to avoid SQLite in-memory errors on macOS/Python 3.12.
         """
-        print("🧠 Loading Embedding Model (all-MiniLM-L6-v2)...")
+        print("Loading Embedding Model (all-MiniLM-L6-v2)...")
         self.model = SentenceTransformer('all-MiniLM-L6-v2')
         
         # Define a specific path for this app's database
@@ -21,9 +23,9 @@ class TrialVectorStore:
         if os.path.exists(self.db_path):
             try:
                 shutil.rmtree(self.db_path)
-                print("🧹 Cleared old database cache.")
+                print(" Cleared old database cache.")
             except Exception as e:
-                print(f"⚠️ Warning: Could not clear cache: {e}")
+                print(f" Warning: Could not clear cache: {e}")
 
         # Initialize standard PersistentClient (More stable than Ephemeral on Mac)
         self.client = chromadb.PersistentClient(path=self.db_path)
@@ -36,7 +38,7 @@ class TrialVectorStore:
         Takes the raw list of trials from the API and pushes them into the Vector DB.
         """
         if not trials_list:
-            print("⚠️ No trials to index.")
+            print(" No trials to index.")
             return 0
             
         # --- ROBUST DATA PREPARATION START ---
@@ -64,7 +66,7 @@ class TrialVectorStore:
         if not ids:
             return 0
 
-        print(f"🔄 Vectorizing {len(ids)} trials...")
+        print(f" Vectorizing {len(ids)} trials...")
         embeddings = self.model.encode(documents).tolist()
         
         # Store in DB
@@ -74,7 +76,7 @@ class TrialVectorStore:
             embeddings=embeddings,
             metadatas=metadatas
         )
-        print("✅ Indexing Complete.")
+        print(" Indexing Complete.")
         return len(ids)
 
     def search(self, patient_query, n_results=3):

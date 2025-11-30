@@ -118,6 +118,32 @@ with tab2:
                 st.session_state['graph_nodes'] = raw_nodes
                 st.session_state['graph_edges'] = raw_edges
                 st.session_state['graph_built'] = True
+    '''
+        if st.button("Generate Knowledge Graph"):
+            with st.status("Building Graph in Neo4j..."):
+
+                try:
+                    st.write("📚 Reading PubMed Papers...")
+                    papers = pubmed_client.fetch_research(topic, max_results=5)
+
+                    st.write("🏥 Fetching Clinical Trials...")
+                    trials = trials_client.search_active_trials(topic, limit=5)
+
+                    st.write("🚀 Pushing data to Neo4j Cloud...")
+                    graph_engine.build_graph(papers, trials)
+
+                    st.write("🎨 Fetching visualization data...")
+                    raw_nodes, raw_edges = graph_engine.get_visualization_data()
+
+                    st.session_state['graph_nodes'] = raw_nodes
+                    st.session_state['graph_edges'] = raw_edges
+                    st.session_state['graph_built'] = True
+                    st.success("Graph built successfully!")
+
+                except Exception as e:
+                    st.session_state['graph_built'] = False
+                    st.error(f"Neo4j / graph error: {e}")
+'''
 
     with col_graph:
         if st.session_state.get('graph_built'):

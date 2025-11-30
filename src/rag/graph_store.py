@@ -1,11 +1,17 @@
 import os
 import re
+import sys
+from pathlib import Path
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
 from transformers import pipeline
 
 # Load environment variables
-load_dotenv()
+project_root = Path(__file__).parent.parent.resolve()
+sys.path.append(str(project_root))
+
+env_path = project_root / ".env"
+load_dotenv(dotenv_path=env_path)
 
 class KnowledgeGraphEngine:
     def __init__(self):
@@ -13,22 +19,33 @@ class KnowledgeGraphEngine:
         uri = os.getenv("NEO4J_URI")
         user = os.getenv("NEO4J_USER")
         password = os.getenv("NEO4J_PASSWORD")
+
+        try:
+            if not uri or not user or not password:
+                raise ValueError("Missing NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD")
+        except ValueError as ve:
+            print(f" Configuration Error: {ve}")
+            sys.exit(1) 
         
-        print("🔌 Connecting to Neo4j...")
+        print(" Connecting to Neo4j...")
         try:
             self.driver = GraphDatabase.driver(uri, auth=(user, password))
             self.driver.verify_connectivity()
-            print("✅ Neo4j Connected.")
+            print("Neo4j Connected.")
         except Exception as e:
-            print(f"❌ Neo4j Failed: {e}")
+            print(f" Neo4j Failed: {e}")
 
         # 2. Load NLP Models (The "A+ Grade" Features)
         # We use a lighter model for speed, but you can swap for 'd4data/biomedical-ner-all'
-        print("🧠 Loading Biomedical NER Model...")
+        print(" Loading Biomedical NER Model...")
         self.ner_pipeline = pipeline("ner", model="d4data/biomedical-ner-all", aggregation_strategy="simple")
         
-        print("🧠 Loading PICO Classifier (SafeTensors)...")
+        print(" Loading PICO Classifier (SafeTensors)...")
         self.pico_pipeline = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
+
+
+   
+
 
     def close(self):
         if self.driver:
@@ -79,7 +96,7 @@ class KnowledgeGraphEngine:
             session.run("MATCH (n) DETACH DELETE n")
             
             # 2. Process Papers (Retrospective Evidence)
-            print(f"📚 Analyzing {len(papers)} Papers...")
+            print(f" Analyzing {len(papers)} Papers...")
             for p in papers:
                 # Run NLP
                 nlp_data = self.analyze_text(p['abstract'])
@@ -105,7 +122,7 @@ class KnowledgeGraphEngine:
                     session.run(query, id=p['id'], name=ent['name'])
 
             # 3. Process Trials (Prospective Action)
-            print(f"🏥 Analyzing {len(trials)} Trials...")
+            print(f" Analyzing {len(trials)} Trials...")
             for t in trials:
                 # We assume trials are "Interventions" by default
                 session.run("""
@@ -128,7 +145,7 @@ class KnowledgeGraphEngine:
                     """
                     session.run(query, id=t['nct_id'], name=ent['name'])
                     
-        print("✅ Knowledge Graph Built Successfully.")
+        print(" Knowledge Graph Built Successfully.")
 
     def get_visualization_data(self):
         """
