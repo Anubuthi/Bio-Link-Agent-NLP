@@ -1,6 +1,7 @@
 import sys
 import os
 from pathlib import Path
+import json
 
 # --- 1. PATH SETUP ---
 project_root = Path(__file__).parent.parent.resolve()
@@ -11,6 +12,7 @@ from mcp.server.fastmcp import FastMCP
 from src.clients.pubmed import PubMedClient
 from src.clients.trials import TrialsClient
 from src.rag.vector_store import TrialVectorStore
+from src.rag.graph_store import KnowledgeGraphEngine
 from dotenv import load_dotenv
 
 # --- 3. LOAD ENV SILENTLY ---
@@ -21,17 +23,20 @@ load_dotenv(dotenv_path=env_path)
 mcp = FastMCP("Bio-Link-Agent")
 email = os.getenv("PUBMED_EMAIL")
 
-# CRITICAL CHANGE: Use stderr for warnings, NEVER print()
+# CRITICAL: Use stderr for warnings, NEVER print()
 if not email:
     sys.stderr.write("WARNING: PUBMED_EMAIL not found in .env\n")
 
-# Default to a dummy email if missing to prevent crash
+# Core clients
 pubmed = PubMedClient(email=email or "test@example.com")
 trials = TrialsClient()
-vector_db = TrialVectorStore() 
+vector_db = TrialVectorStore()
+kg_engine = KnowledgeGraphEngine()
 
 
-#Adding helper fuction for trails search
+# ---------------------------
+# Helper: Trial filtering
+# ---------------------------
 def _normalize_sex(value: str | None) -> str | None:
     if not value:
         return None
@@ -79,7 +84,6 @@ def filter_trials_by_patient(
         # --- Sex ---
         if sex_norm:
             trial_sex = _normalize_sex(t.get("sex") or "ALL") or "ALL"
-            # If trial is not ALL, it must match the patient
             if trial_sex != "ALL" and trial_sex != sex_norm:
                 sex_ok = False
 
@@ -88,9 +92,8 @@ def filter_trials_by_patient(
             loc_block = t.get("locations", {}) or {}
             trial_countries = [
                 (c or "").strip().lower()
-                for c in loc_block.get("countries", []) or []
+                for c in (loc_block.get("countries") or [])
             ]
-            # If there are any countries listed and patient's country not in them → fail
             if trial_countries and country_norm not in trial_countries:
                 loc_ok = False
 
@@ -100,28 +103,88 @@ def filter_trials_by_patient(
     return filtered
 
 
+# ---------------------------
+# TOOLS
+# ---------------------------
+
 @mcp.tool()
 def search_medical_data(query: str) -> str:
     """
-    Searches both PubMed and ClinicalTrials.gov.
+    High-level helper: Searches both PubMed and ClinicalTrials.gov.
+
+    Returns a human-readable summary string.
     """
     try:
-        sys.stderr.write(f"DEBUG: searching for {query}\n") # Safe logging
+        sys.stderr.write(f"DEBUG: search_medical_data query={query}\n")
         papers = pubmed.fetch_research(query, max_results=3)
         active_trials = trials.search_active_trials(query, limit=3)
-        
+
         return f"""
         RESEARCH SUMMARY FOR: {query}
-        
+
         --- 📚 PUBMED LITERATURE ---
-        {str(papers)}
-        
+        {papers}
+
         --- 🏥 ACTIVE TRIALS ---
-        {str(active_trials)}
+        {active_trials}
         """
     except Exception as e:
-        return f"Error: {str(e)}"
-    
+        return f"Error in search_medical_data: {str(e)}"
+
+
+@mcp.tool()
+def search_pubmed(query: str, max_results: int = 5) -> str:
+    """
+    Search only PubMed and return a JSON string of paper metadata.
+
+    Intended for research-oriented queries where only literature is needed.
+    """
+    try:
+        sys.stderr.write(f"DEBUG: search_pubmed query={query}, max_results={max_results}\n")
+        papers = pubmed.fetch_research(query, max_results=max_results)
+        return json.dumps(papers, indent=2)
+    except Exception as e:
+        return f"Error in search_pubmed: {str(e)}"
+
+
+@mcp.tool()
+def search_trials(
+    condition: str,
+    limit: int = 5,
+    country: str | None = None,
+) -> str:
+    """
+    Search only ClinicalTrials.gov for active trials for a given condition.
+
+    Args:
+        condition: e.g. "lung cancer"
+        limit: max trials to return
+        country: optional country filter, e.g. "United States"
+    """
+    try:
+        sys.stderr.write(
+            f"DEBUG: search_trials condition={condition}, limit={limit}, country={country}\n"
+        )
+        all_trials = trials.search_active_trials(condition, limit=limit)
+
+        if country:
+            country_norm = country.strip().lower()
+            filtered = []
+            for t in all_trials:
+                loc_block = t.get("locations", {}) or {}
+                countries = [
+                    (c or "").strip().lower()
+                    for c in (loc_block.get("countries") or [])
+                ]
+                if not countries or country_norm in countries:
+                    filtered.append(t)
+            all_trials = filtered
+
+        return json.dumps(all_trials, indent=2)
+    except Exception as e:
+        return f"Error in search_trials: {str(e)}"
+
+
 @mcp.tool()
 def match_trials_semantic(
     condition: str,
@@ -150,12 +213,10 @@ def match_trials_semantic(
             f"DEBUG: match_trials_semantic cond={condition}, age={age}, sex={sex}, country={country}, limit={limit}\n"
         )
 
-        # 1) Fetch a slightly larger pool from ClinicalTrials.gov
         raw_trials = trials.search_active_trials(condition, limit=50)
         if not raw_trials:
             return f"No active recruiting trials found for condition: {condition}"
 
-        # 2) Apply patient-level filters
         eligible_trials = filter_trials_by_patient(
             raw_trials,
             age=age,
@@ -169,13 +230,11 @@ def match_trials_semantic(
                 f"(age/sex/location) for condition: {condition}"
             )
 
-        # 3) Index only the eligible trials into the vector DB
         count = vector_db.index_trials(eligible_trials)
 
-        # 4) Run semantic similarity search on patient_note
         matches = vector_db.search(
             patient_query=patient_note,
-            n_results=min(limit, count)
+            n_results=min(limit, count),
         )
 
         if not matches:
@@ -184,13 +243,11 @@ def match_trials_semantic(
                 "Try broadening the note or filters."
             )
 
-        # 5) Format a readable response with some key metadata
         lines = [
             f"Semantic Trial Matches for condition='{condition}'",
             f"(filtered by age={age}, sex={sex}, country={country})\n",
         ]
 
-        # Build a quick lookup from id -> full trial dict so we can attach extras
         by_id = {str(t["nct_id"]): t for t in eligible_trials if t.get("nct_id")}
 
         for m in matches:
@@ -215,6 +272,52 @@ def match_trials_semantic(
 
     except Exception as e:
         return f"Error in match_trials_semantic: {str(e)}"
+
+
+@mcp.tool()
+def build_knowledge_graph(
+    topic: str,
+    max_papers: int = 10,
+    max_trials: int = 10,
+    include_trials: bool = True,
+) -> str:
+    """
+    Build a Neo4j knowledge graph for a given research topic.
+
+    - Always fetches PubMed papers.
+    - Optionally fetches ClinicalTrials.gov trials (if include_trials=True).
+    - Pushes them into Neo4j via KnowledgeGraphEngine.
+    - Returns a summary of what was ingested.
+    """
+    try:
+        sys.stderr.write(
+            "DEBUG: build_knowledge_graph "
+            f"topic={topic}, max_papers={max_papers}, "
+            f"max_trials={max_trials}, include_trials={include_trials}\n"
+        )
+
+        # Always get papers
+        papers = pubmed.fetch_research(topic, max_results=max_papers)
+
+        # Optionally get trials
+        if include_trials and max_trials > 0:
+            active_trials = trials.search_active_trials(topic, limit=max_trials)
+        else:
+            active_trials = []
+
+        # Build graph with whatever we have
+        kg_engine.build_graph(papers, active_trials)
+
+        summary = {
+            "topic": topic,
+            "papers_ingested": len(papers),
+            "trials_ingested": len(active_trials),
+            "mode": "papers_only" if not include_trials or max_trials == 0 else "papers_and_trials",
+        }
+        return json.dumps(summary, indent=2)
+    except Exception as e:
+        return f"Error in build_knowledge_graph: {str(e)}"
+
 
 if __name__ == "__main__":
     mcp.run()

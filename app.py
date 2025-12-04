@@ -8,10 +8,18 @@ from src.clients.pubmed import PubMedClient
 from src.rag.vector_store import TrialVectorStore
 from src.rag.graph_store import KnowledgeGraphEngine
 
+# 🔹 NEW: import router + answer LLM
+from router.router import (
+    route_query,
+    execute_tool,
+)
+# If you implemented generate_final_answer as we discussed:
+from router.router import generate_final_answer
+
 # 1. Page Configuration
 st.set_page_config(
-    page_title="Bio-Link Agent", 
-    page_icon="🧬", 
+    page_title="Bio-Link Agent",
+    page_icon="🧬",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -22,6 +30,7 @@ st.set_page_config(
 def load_tools():
     # This prevents reloading heavy BERT models on every click
     return TrialsClient(), TrialVectorStore(), PubMedClient(), KnowledgeGraphEngine()
+
 try:
     trials_client, vector_db, pubmed_client, graph_engine = load_tools()
 except Exception as e:
@@ -31,13 +40,17 @@ except Exception as e:
 # 3. Sidebar / Header
 st.title("🧬 Bio-Link Agent")
 st.markdown("""
-**Connecting Retrospective Evidence (PubMed) with Prospective Action (ClinicalTrials.gov)**
-* **System Status:** 🟢 Online
+**Connecting Retrospective Evidence (PubMed) with Prospective Action (ClinicalTrials.gov)**  
+* **System Status:** 🟢 Online  
 * **Database:** Neo4j AuraDB (Graph) + ChromaDB (Vectors)
 """)
 
-# 4. Main Tabs
-tab1, tab2 = st.tabs(["🩺 Clinician: Patient Matcher", "🔬 Researcher: Landscape Graph"])
+# 4. Main Tabs  🔹 NEW: Agentic Q&A tab
+tab1, tab2, tab3 = st.tabs([
+    "🩺 Clinician: Patient Matcher",
+    "🔬 Researcher: Landscape Graph",
+    "🧠 Agentic Q&A"
+])
 
 # ==========================================
 # TAB 1: VECTOR SEARCH (The "Micro" Problem)
@@ -51,10 +64,13 @@ with tab1:
     with col1:
         st.subheader("Patient Input")
         condition = st.text_input("Condition", value="Lung Cancer")
-        patient_note = st.text_area("Patient Notes", 
-            value="45yo male, Stage IV, progressed on cisplatin. Complains of severe fatigue and neuropathy.", height=150)
+        patient_note = st.text_area(
+            "Patient Notes",
+            value="45yo male, Stage IV, progressed on cisplatin. Complains of severe fatigue and neuropathy.",
+            height=150
+        )
         
-        if st.button("Find Matches", type="primary"):
+        if st.button("Find Matches", type="primary", key="btn_find_matches"):
             with st.status("Agent Working...", expanded=True) as status:
                 st.write(f"🔌 Fetching active '{condition}' trials...")
                 raw_data = trials_client.search_active_trials(condition, limit=15)
@@ -97,14 +113,18 @@ with tab2:
     with col_search:
         topic = st.text_input("Research Topic", value="Glioblastoma Immunotherapy")
         
-        if st.button("Generate Knowledge Graph"):
+        if st.button("Generate Knowledge Graph", key="btn_generate_kg"):
             with st.status("Building Graph in Neo4j..."):
                 # 1. Fetch Data
                 st.write("📚 Reading PubMed Papers...")
                 papers = pubmed_client.fetch_research(topic, max_results=5)
-                
-                st.write("🏥 Fetching Clinical Trials...")
-                trials = trials_client.search_active_trials(topic, limit=5)
+
+                include_trials = st.checkbox("Include clinical trials in graph", value=True)
+                if include_trials:
+                    st.write("🏥 Fetching Clinical Trials...")
+                    trials = trials_client.search_active_trials(topic, limit=5)
+                else:
+                    trials = []
                 
                 # 2. Build Graph
                 st.write("🚀 Pushing data to Neo4j Cloud...")
@@ -118,32 +138,6 @@ with tab2:
                 st.session_state['graph_nodes'] = raw_nodes
                 st.session_state['graph_edges'] = raw_edges
                 st.session_state['graph_built'] = True
-    '''
-        if st.button("Generate Knowledge Graph"):
-            with st.status("Building Graph in Neo4j..."):
-
-                try:
-                    st.write("📚 Reading PubMed Papers...")
-                    papers = pubmed_client.fetch_research(topic, max_results=5)
-
-                    st.write("🏥 Fetching Clinical Trials...")
-                    trials = trials_client.search_active_trials(topic, limit=5)
-
-                    st.write("🚀 Pushing data to Neo4j Cloud...")
-                    graph_engine.build_graph(papers, trials)
-
-                    st.write("🎨 Fetching visualization data...")
-                    raw_nodes, raw_edges = graph_engine.get_visualization_data()
-
-                    st.session_state['graph_nodes'] = raw_nodes
-                    st.session_state['graph_edges'] = raw_edges
-                    st.session_state['graph_built'] = True
-                    st.success("Graph built successfully!")
-
-                except Exception as e:
-                    st.session_state['graph_built'] = False
-                    st.error(f"Neo4j / graph error: {e}")
-'''
 
     with col_graph:
         if st.session_state.get('graph_built'):
@@ -154,29 +148,28 @@ with tab2:
             # Create Nodes
             for n in st.session_state['graph_nodes']:
                 nodes.append(Node(
-                    id=n['id'], 
-                    label=n['label'], 
-                    size=n['size'], 
+                    id=n['id'],
+                    label=n['label'],
+                    size=n['size'],
                     color=n['color']
                 ))
             
             # Create Edges
             for e in st.session_state['graph_edges']:
                 edges.append(Edge(
-                    source=e['source'], 
+                    source=e['source'],
                     target=e['target'],
-                    # Optional: Add label to edge if your graph store returns it
-                    # label="MENTIONS" 
+                    # label="MENTIONS"  # optional
                 ))
             
             # Config
             config = Config(
-                width=800, 
-                height=600, 
-                directed=True, 
-                physics=True, 
+                width=800,
+                height=600,
+                directed=True,
+                physics=True,
                 hierarchy=False,
-                nodeHighlightBehavior=True, 
+                nodeHighlightBehavior=True,
                 highlightColor="#F7A7A6",
                 collapsible=False
             )
@@ -184,6 +177,120 @@ with tab2:
             st.success(f"Graph Generated: {len(nodes)} Nodes found.")
             
             # Render
-            return_value = agraph(nodes=nodes, edges=edges, config=config)
+            _ = agraph(nodes=nodes, edges=edges, config=config)
         else:
             st.markdown("Waiting for graph generation...")
+
+# ==========================================
+# TAB 3: AGENTIC Q&A (Router + Tools + LLM Answer)
+# ==========================================
+with tab3:
+    st.header("Agentic Biomedical Q&A")
+    st.info("Ask a free-form biomedical question. The Agent will route to PubMed / Trials / KG and summarize the results.")
+
+    user_query = st.text_area(
+        "Ask a question",
+        value="What are the latest treatment options and active trials for metastatic EGFR-mutant NSCLC?",
+        height=120,
+    )
+
+    col_left, col_right = st.columns([1, 1])
+
+    with col_left:
+        run_agent = st.button("Ask Bio-Link Agent", type="primary", key="btn_agentic_qa")
+
+    if run_agent and user_query.strip():
+        with st.status("Routing query and calling tools...", expanded=True) as status:
+            try:
+                # 1) Router decides tool + params
+                selection = route_query(user_query)
+                st.write("🧠 **Router Decision**")
+                st.json(selection.model_dump(), expanded=False)
+
+                # 2) Execute tool (PubMed / Trials / KG / combo)
+                st.write("🛠 **Calling Tool...**")
+                raw_result = execute_tool(selection, original_query=user_query)
+
+                # Store in session_state for later inspection
+                st.session_state["agent_last_selection"] = selection
+                st.session_state["agent_last_raw_result"] = raw_result
+
+                status.update(label="Tools finished. Generating answer...", state="running")
+
+                # 3) Use LLM to turn raw result into coherent answer
+                final_answer = generate_final_answer(
+                    user_query=user_query,
+                    selection=selection,
+                    tool_result=raw_result,
+                    model_name="qwen2.5:3b",
+                )
+
+                st.session_state["agent_last_answer"] = final_answer
+
+                # 🔹 NEW: if the agent built a knowledge graph, fetch it for visualization
+                if selection.tool_name == "build_knowledge_graph":
+                    st.write("🕸 Fetching graph data for visualization...")
+                    raw_nodes, raw_edges = graph_engine.get_visualization_data()
+                    st.session_state["agent_graph_nodes"] = raw_nodes
+                    st.session_state["agent_graph_edges"] = raw_edges
+
+                status.update(label="Done!", state="complete", expanded=False)
+
+                st.session_state["agent_last_answer"] = final_answer
+
+            except Exception as e:
+                st.error(f"Agent error: {e}")
+                status.update(label="Failed", state="error", expanded=True)
+
+    # Display answer + debug info if available
+    if "agent_last_answer" in st.session_state:
+        st.markdown("### 🧾 Final Answer")
+        st.markdown(st.session_state["agent_last_answer"])
+
+        with st.expander("🔍 Debug: Router Decision & Raw Tool Output"):
+            if "agent_last_selection" in st.session_state:
+                st.markdown("**Router Selection**")
+                st.json(st.session_state["agent_last_selection"].model_dump(), expanded=False)
+
+            if "agent_last_raw_result" in st.session_state:
+                st.markdown("**Raw Tool Result**")
+                st.write(st.session_state["agent_last_raw_result"])
+
+    if (
+        st.session_state.get("agent_graph_nodes") 
+        and st.session_state.get("agent_graph_edges")
+    ):
+        st.markdown("### 🕸 Knowledge Graph (Agent Output)")
+
+        # Convert raw dicts to Agraph Nodes/Edges
+        nodes = [
+            Node(
+                id=n["id"],
+                label=n["label"],
+                size=n["size"],
+                color=n["color"],
+            )
+            for n in st.session_state["agent_graph_nodes"]
+        ]
+
+        edges = [
+            Edge(
+                source=e["source"],
+                target=e["target"],
+                # label=e.get("label", "")  # optional
+            )
+            for e in st.session_state["agent_graph_edges"]
+        ]
+
+        config = Config(
+            width=800,
+            height=600,
+            directed=True,
+            physics=True,
+            hierarchy=False,
+            nodeHighlightBehavior=True,
+            highlightColor="#F7A7A6",
+            collapsible=False,
+        )
+
+        _ = agraph(nodes=nodes, edges=edges, config=config)
