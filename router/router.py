@@ -1,3 +1,4 @@
+'''
 import json
 from typing import Any, Dict
 
@@ -229,6 +230,262 @@ if __name__ == "__main__":
                     selection=selection,
                     tool_result=result,
                     model_name="qwen2.5:3b",  # or any other Ollama model you like
+                )
+
+                print("===== FINAL ANSWER =====")
+                print(final_answer)
+                print("========================\n")
+
+
+            except Exception as e:
+                print(f"[ERROR] {e}\n")
+
+    except KeyboardInterrupt:
+        print("\nExiting router CLI.")
+'''
+import json
+import sys
+from typing import Any, Dict
+
+# Need requests for HTTP calls
+import requests
+from ollama import chat
+
+# Assuming these are Pydantic models for routing
+from .router_models import ToolSelection
+from .router_prompt import ROUTER_SYSTEM_PROMPT
+from .answer_prompt import ANSWER_SYSTEM_PROMPT
+
+# --- Configuration ---
+# IMPORTANT: This must match the URL where your FastMCP server is running
+MCP_SERVER_URL = "http://127.0.0.1:8000"
+MCP_TOOL_ENDPOINT = f"{MCP_SERVER_URL}/tool/execute"
+# ---------------------
+
+def _call_ollama_router(
+    user_query: str,
+    model_name: str = "qwen2.5:3b",
+) -> Dict[str, Any]:
+    """
+    Low-level helper that calls the small LLM via Ollama and
+    returns the raw JSON object produced by the model.
+    """
+    response = chat(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
+            {"role": "user", "content": user_query},
+        ],
+        # Ask Ollama to format output according to our Pydantic schema
+        format=ToolSelection.model_json_schema(),
+        options={
+            "temperature": 0.0,
+        },
+    )
+
+    content = response["message"]["content"]
+
+    # content is usually a JSON string; handle both str and dict just in case
+    if isinstance(content, str):
+        data = json.loads(content)
+    else:
+        data = content
+
+    return data
+
+
+def route_query(
+    user_query: str,
+    model_name: str = "qwen2.5:3b",
+) -> ToolSelection:
+    """
+    High-level function:
+    - Sends the user query to the router LLM.
+    - Parses the JSON into a ToolSelection object.
+    """
+    data = _call_ollama_router(user_query, model_name=model_name)
+    return ToolSelection(**data)
+
+
+def execute_tool(
+    selection: ToolSelection,
+    original_query: str | None = None,
+) -> str:
+    """
+    Execute the chosen tool by making an HTTP request to the FastMCP server.
+
+    We still include the defensive fallbacks to ensure the JSON payload
+    sent to the server is valid.
+    """
+    tool_name = selection.tool_name
+
+    # Start with the router-provided parameters
+    params: Dict[str, Any] = dict(selection.parameters or {})
+
+    # ---------- Defensive fallbacks by tool (Keep this logic!) ----------
+    # This ensures the required parameter is always sent to the FastMCP server
+    if tool_name in ["search_medical_data", "search_pubmed"]:
+        if "query" not in params:
+            if original_query is None:
+                raise ValueError(f"Router did not provide 'query' for {tool_name}.")
+            params["query"] = original_query
+        # search_pubmed default
+        if tool_name == "search_pubmed":
+            params.setdefault("max_results", 5)
+
+    elif tool_name == "search_trials":
+        if "condition" not in params:
+            if original_query is None:
+                raise ValueError("Router did not provide 'condition' for search_trials.")
+            params["condition"] = original_query
+        params.setdefault("limit", 5)
+
+    elif tool_name == "match_trials_semantic":
+        if "condition" not in params:
+            if original_query is None:
+                raise ValueError("Router did not provide 'condition' for match_trials_semantic.")
+            params["condition"] = original_query
+        if "patient_note" not in params:
+            if original_query is None:
+                raise ValueError("Router did not provide 'patient_note' for match_trials_semantic.")
+            params["patient_note"] = original_query
+        params.setdefault("limit", 5)
+
+    elif tool_name == "build_knowledge_graph":
+        if "topic" not in params:
+            if original_query is None:
+                raise ValueError("Router did not provide 'topic' for build_knowledge_graph.")
+            params["topic"] = original_query
+        params.setdefault("max_papers", 10)
+        params.setdefault("max_trials", 10)
+    # --------------------------------------------------------------------
+
+    # --- HTTP Call to FastMCP Server ---
+    payload = {
+        "tool_name": tool_name,
+        "parameters": params
+    }
+
+    try:
+        response = requests.post(
+            MCP_TOOL_ENDPOINT,
+            json=payload,
+            timeout=300 # 5 minutes timeout for long-running KG builds
+        )
+        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+
+        # The FastMCP tool endpoint returns a JSON object with a 'result' key
+        response_data = response.json()
+        return response_data.get("result", f"Error: No 'result' key in server response: {response_data}")
+
+    except requests.exceptions.ConnectionError:
+        return (
+            f"Error: Could not connect to FastMCP server at {MCP_SERVER_URL}. "
+            "Please ensure src/server.py is running and accessible."
+        )
+    except requests.exceptions.HTTPError as err:
+        return f"Error executing tool via HTTP: {err}\nServer Response: {response.text}"
+    except Exception as e:
+        return f"An unexpected error occurred during tool execution: {str(e)}"
+    # -----------------------------------
+
+
+def route_and_execute(
+    user_query: str,
+    model_name: str = "qwen2.5:3b",
+) -> Dict[str, Any]:
+    """
+    Convenience helper that:
+    - Routes the query
+    - Executes the chosen tool
+    - Returns both the selection metadata and the raw tool result
+    """
+    selection = route_query(user_query, model_name=model_name)
+    result = execute_tool(selection, original_query=user_query)
+
+    return {
+        "selection": selection.model_dump(),
+        "result": result,
+    }
+
+def generate_final_answer(
+    user_query: str,
+    selection: ToolSelection,
+    tool_result: str,
+    model_name: str = "qwen2.5:3b",
+) -> str:
+    """
+    Use a (possibly larger) LLM to turn the raw tool_result into a
+    coherent, user-facing answer.
+    """
+    # This function remains the same, using the tool_result string
+    messages = [
+        {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                "User question:\n"
+                f"{user_query}\n\n"
+                "Chosen tool:\n"
+                f"{selection.tool_name}\n\n"
+                "Tool parameters:\n"
+                f"{json.dumps(selection.parameters, indent=2)}\n\n"
+                "Raw tool result (JSON or text):\n"
+                f"{tool_result}\n\n"
+                "Please write a clear, coherent answer for the user based ONLY on this data."
+            ),
+        },
+    ]
+
+    response = chat(
+        model=model_name,
+        messages=messages,
+        options={"temperature": 0.2},
+    )
+
+    return response["message"]["content"]
+
+
+if __name__ == "__main__":
+    # Simple CLI loop for local testing
+    print(" Bio-Link Router (using Ollama)")
+    print(f"Server URL: {MCP_SERVER_URL}")
+    print("Model: qwen2.5:3b")
+    print("Type Ctrl+C to exit.\n")
+
+    try:
+        # Check connectivity once at startup
+        try:
+            requests.get(MCP_SERVER_URL, timeout=5).raise_for_status()
+            print("🟢 FastMCP Server check: Success.")
+        except requests.exceptions.RequestException:
+            print(f"🔴 FastMCP Server check: FAILED. Ensure server is running at {MCP_SERVER_URL}")
+            sys.exit(1)
+
+
+        while True:
+            user_q = input("User: ").strip()
+            if not user_q:
+                continue
+
+            try:
+                selection = route_query(user_q)
+                print("\n[Router Decision]")
+                print(f"  Tool:       {selection.tool_name}")
+                print(f"  Parameters: {selection.parameters}")
+                print(f"  Confidence: {selection.confidence_score:.2f}")
+                print(f"  Reasoning:  {selection.reasoning}\n")
+
+                result = execute_tool(selection, original_query=user_q)
+                print("----- RAW TOOL RESULT (debug) -----")
+                print(result)
+                print("-----------------------------------\n")
+
+                final_answer = generate_final_answer(
+                    user_query=user_q,
+                    selection=selection,
+                    tool_result=result,
+                    model_name="qwen2.5:3b",
                 )
 
                 print("===== FINAL ANSWER =====")
