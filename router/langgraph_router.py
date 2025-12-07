@@ -1,334 +1,508 @@
+"""
+LangGraph Agentic Workflow with proper MCP tool calling.
+Supports multi-tool execution, dynamic routing, and reflection.
+"""
 import json
 import sys
-from typing import TypedDict, Any, Dict
+from typing import TypedDict, Annotated, Literal
+from operator import add
 
 import requests
 from ollama import chat
 from langgraph.graph import StateGraph, END
-
-# Assuming these are Pydantic models for routing
-from router_models import ToolSelection
-from router_prompt import ROUTER_SYSTEM_PROMPT
-from answer_prompt import ANSWER_SYSTEM_PROMPT
+from langgraph.prebuilt import ToolNode
 
 # --- Configuration ---
 MCP_SERVER_URL = "http://127.0.0.1:8005"
-MCP_TOOL_ENDPOINT = f"{MCP_SERVER_URL}/tool/execute"
-ROUTER_MODEL = "qwen2.5:3b"
-ANSWER_MODEL = "qwen2.5:3b"
+MCP_TOOLS_LIST_ENDPOINT = f"{MCP_SERVER_URL}/tools/list"
+MCP_TOOL_CALL_ENDPOINT = f"{MCP_SERVER_URL}/tools/call"
+AGENT_MODEL = "qwen2.5:7b"  # Larger model for better reasoning
 # ---------------------
 
 
 # --- State Definition ---
-class GraphState(TypedDict):
-    """State object that gets passed between nodes in the graph"""
-    user_query: str
-    tool_name: str | None
-    tool_parameters: Dict[str, Any] | None
-    confidence_score: float | None
-    reasoning: str | None
-    tool_result: str | None
-    final_answer: str | None
-    error: str | None
+class AgentState(TypedDict):
+    """
+    Agentic state with message history and tool call tracking.
+    """
+    messages: Annotated[list[dict], add]  # Conversation history
+    user_query: str  # Original query
+    available_tools: list[dict]  # MCP tool schemas
+    next_action: Literal["call_tool", "respond", "end"]  # Agent decision
+    tool_calls: list[dict]  # Pending tool calls
+    tool_results: list[dict]  # Completed tool results
+    iteration: int  # Iteration counter
+    max_iterations: int  # Safety limit
 
 
-# --- Node 1: Router Node ---
-def router_node(state: GraphState) -> GraphState:
+# --- Agent System Prompt ---
+AGENT_SYSTEM_PROMPT = """You are Bio-Link Agent, an expert biomedical research assistant with access to specialized tools.
+
+AVAILABLE TOOLS:
+{tools_description}
+
+YOUR WORKFLOW:
+1. Analyze the user's query carefully
+2. Decide if you need to call tool(s) or can answer directly
+3. You can call MULTIPLE tools if needed (e.g., search papers AND trials)
+4. After getting tool results, synthesize a comprehensive answer
+5. If results are insufficient, you can call more tools
+
+TOOL CALLING FORMAT:
+When you need to call tools, respond with JSON:
+{{
+  "action": "call_tool",
+  "tool_calls": [
+    {{
+      "tool": "search_pubmed",
+      "arguments": {{"query": "EGFR mutations in lung cancer", "max_results": 5}}
+    }},
+    {{
+      "tool": "search_clinical_trials",
+      "arguments": {{"condition": "EGFR-positive NSCLC", "limit": 5}}
+    }}
+  ],
+  "reasoning": "Need both research and trial data to answer comprehensively"
+}}
+
+RESPONDING FORMAT:
+When you're ready to answer, respond with JSON:
+{{
+  "action": "respond",
+  "answer": "Based on the research papers and clinical trials...",
+  "confidence": 0.9
+}}
+
+GUIDELINES:
+- Use specific, detailed queries for tools (not vague terms)
+- For patient matching, use match_patient_to_trials with full clinical details
+- For research mechanisms, use search_pubmed
+- For trial availability, use search_clinical_trials
+- For comprehensive overviews, call BOTH search_pubmed and search_clinical_trials
+- For knowledge graphs, only use build_knowledge_graph when explicitly requested
+- Always explain your reasoning
+- Be concise but thorough
+- Cite sources when possible (PMIDs, NCT IDs)
+
+Current conversation context:
+{conversation_history}
+"""
+
+
+# --- Helper Functions ---
+def get_mcp_tools() -> list[dict]:
+    """Fetch available tools from MCP server."""
+    try:
+        response = requests.get(MCP_TOOLS_LIST_ENDPOINT, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("tools", [])
+    except Exception as e:
+        sys.stderr.write(f"⚠️  Failed to fetch MCP tools: {e}\n")
+        return []
+
+
+def call_mcp_tool(tool_name: str, arguments: dict) -> dict:
+    """Execute a single tool call on MCP server."""
+    try:
+        payload = {
+            "name": tool_name,
+            "arguments": arguments
+        }
+        response = requests.post(
+            MCP_TOOL_CALL_ENDPOINT,
+            json=payload,
+            timeout=300
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        return {
+            "error": f"MCP tool call failed: {str(e)}",
+            "tool": tool_name,
+            "arguments": arguments
+        }
+
+
+def format_tools_description(tools: list[dict]) -> str:
+    """Format tool schemas for prompt."""
+    lines = []
+    for tool in tools:
+        name = tool.get("name", "unknown")
+        desc = tool.get("description", "")
+        params = tool.get("inputSchema", {}).get("properties", {})
+        
+        lines.append(f"\n{name}:")
+        lines.append(f"  Description: {desc}")
+        lines.append(f"  Parameters: {list(params.keys())}")
+    
+    return "\n".join(lines)
+
+
+def format_conversation_history(messages: list[dict]) -> str:
+    """Format message history for context."""
+    lines = []
+    for msg in messages[-6:]:  # Last 6 messages for context
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            preview = content[:200] + "..." if len(content) > 200 else content
+            lines.append(f"{role.upper()}: {preview}")
+    return "\n".join(lines)
+
+
+# --- Agent Node ---
+def agent_node(state: AgentState) -> AgentState:
     """
-    Routes the user query using a small LLM to determine which tool to call.
-    Updates state with tool selection details.
+    Main agent reasoning node. Decides whether to call tools or respond.
     """
-    user_query = state["user_query"]
+    messages = state["messages"]
+    available_tools = state["available_tools"]
+    iteration = state.get("iteration", 0)
+    max_iterations = state.get("max_iterations", 5)
+    
+    # Check iteration limit
+    if iteration >= max_iterations:
+        return {
+            **state,
+            "next_action": "respond",
+            "messages": messages + [{
+                "role": "assistant",
+                "content": json.dumps({
+                    "action": "respond",
+                    "answer": "I've reached my reasoning limit. Based on what I've gathered, here's my response...",
+                    "confidence": 0.5
+                })
+            }],
+            "iteration": iteration + 1
+        }
     
     try:
-        # Call Ollama with router prompt
+        # Build agent prompt
+        tools_desc = format_tools_description(available_tools)
+        conv_history = format_conversation_history(messages)
+        
+        system_prompt = AGENT_SYSTEM_PROMPT.format(
+            tools_description=tools_desc,
+            conversation_history=conv_history
+        )
+        
+        # Call LLM
         response = chat(
-            model=ROUTER_MODEL,
+            model=AGENT_MODEL,
             messages=[
-                {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
-                {"role": "user", "content": user_query},
+                {"role": "system", "content": system_prompt},
+                *messages
             ],
-            format=ToolSelection.model_json_schema(),
-            options={"temperature": 0.0},
+            options={"temperature": 0.1}
         )
         
         content = response["message"]["content"]
         
-        # Parse JSON response
+        # Try to parse JSON response
+        try:
+            if isinstance(content, str):
+                # Extract JSON from markdown code blocks if present
+                if "```json" in content:
+                    content = content.split("```json")[1].split("```")[0].strip()
+                elif "```" in content:
+                    content = content.split("```")[1].split("```")[0].strip()
+                
+                decision = json.loads(content)
+            else:
+                decision = content
+        except json.JSONDecodeError:
+            # Fallback: treat as direct response
+            decision = {
+                "action": "respond",
+                "answer": content,
+                "confidence": 0.7
+            }
+        
+        action = decision.get("action", "respond")
+        
+        # Add agent's decision to messages
+        new_messages = messages + [{
+            "role": "assistant",
+            "content": json.dumps(decision) if isinstance(decision, dict) else content
+        }]
+        
+        if action == "call_tool":
+            return {
+                **state,
+                "next_action": "call_tool",
+                "tool_calls": decision.get("tool_calls", []),
+                "messages": new_messages,
+                "iteration": iteration + 1
+            }
+        else:
+            return {
+                **state,
+                "next_action": "respond",
+                "messages": new_messages,
+                "iteration": iteration + 1
+            }
+    
+    except Exception as e:
+        error_msg = f"Agent reasoning error: {str(e)}"
+        sys.stderr.write(f"❌ {error_msg}\n")
+        
+        return {
+            **state,
+            "next_action": "respond",
+            "messages": messages + [{
+                "role": "assistant",
+                "content": json.dumps({
+                    "action": "respond",
+                    "answer": f"I encountered an error: {error_msg}",
+                    "confidence": 0.0
+                })
+            }],
+            "iteration": iteration + 1
+        }
+
+
+# --- Tool Execution Node ---
+def tool_execution_node(state: AgentState) -> AgentState:
+    """
+    Execute tool calls in parallel and add results to state.
+    """
+    tool_calls = state.get("tool_calls", [])
+    messages = state["messages"]
+    
+    if not tool_calls:
+        return {
+            **state,
+            "next_action": "respond"
+        }
+    
+    results = []
+    
+    for tool_call in tool_calls:
+        tool_name = tool_call.get("tool")
+        arguments = tool_call.get("arguments", {})
+        
+        sys.stderr.write(f"🔧 Calling tool: {tool_name} with {arguments}\n")
+        
+        result = call_mcp_tool(tool_name, arguments)
+        results.append({
+            "tool": tool_name,
+            "arguments": arguments,
+            "result": result
+        })
+    
+    # Add tool results to messages
+    tool_message = {
+        "role": "tool",
+        "content": json.dumps(results, indent=2)
+    }
+    
+    return {
+        **state,
+        "tool_results": results,
+        "messages": messages + [tool_message],
+        "next_action": "call_tool",  # Return to agent for synthesis
+        "tool_calls": []  # Clear pending calls
+    }
+
+
+# --- Response Node ---
+def response_node(state: AgentState) -> AgentState:
+    """
+    Extract final answer from agent's response.
+    """
+    messages = state["messages"]
+    
+    # Get last assistant message
+    last_msg = None
+    for msg in reversed(messages):
+        if msg.get("role") == "assistant":
+            last_msg = msg
+            break
+    
+    if not last_msg:
+        return {
+            **state,
+            "next_action": "end"
+        }
+    
+    content = last_msg.get("content", "")
+    
+    try:
         if isinstance(content, str):
             data = json.loads(content)
         else:
             data = content
         
-        # Parse into ToolSelection object
-        selection = ToolSelection(**data)
-        
-        # Update state
-        return {
-            **state,
-            "tool_name": selection.tool_name,
-            "tool_parameters": selection.parameters or {},
-            "confidence_score": selection.confidence_score,
-            "reasoning": selection.reasoning,
-        }
-        
-    except Exception as e:
-        return {
-            **state,
-            "error": f"Router node error: {str(e)}",
-            "final_answer": f"Error in routing: {str(e)}"
-        }
+        final_answer = data.get("answer", content)
+    except:
+        final_answer = content
+    
+    # Add final answer as user-facing message
+    return {
+        **state,
+        "messages": messages + [{
+            "role": "final_answer",
+            "content": final_answer
+        }],
+        "next_action": "end"
+    }
 
 
-# --- Node 2: Tool Execution Node ---
-def tool_execution_node(state: GraphState) -> GraphState:
+# --- Routing Logic ---
+def should_continue(state: AgentState) -> Literal["agent", "tools", "respond", "end"]:
     """
-    Executes the selected tool by calling the MCP server via HTTP.
-    Applies defensive parameter fallbacks before calling the server.
+    Determine next node based on agent's decision.
     """
-    # Check if there was an error in previous node
-    if state.get("error"):
-        return state
+    next_action = state.get("next_action", "end")
     
-    tool_name = state["tool_name"]
-    params = dict(state["tool_parameters"] or {})
-    original_query = state["user_query"]
-    
-    try:
-        # --- Defensive fallbacks by tool ---
-        if tool_name in ["search_medical_data", "search_pubmed"]:
-            if "query" not in params:
-                params["query"] = original_query
-            if tool_name == "search_pubmed":
-                params.setdefault("max_results", 5)
-        
-        elif tool_name == "search_trials":
-            if "condition" not in params:
-                params["condition"] = original_query
-            params.setdefault("limit", 5)
-        
-        elif tool_name == "match_trials_semantic":
-            if "condition" not in params:
-                params["condition"] = original_query
-            if "patient_note" not in params:
-                params["patient_note"] = original_query
-            params.setdefault("limit", 5)
-        
-        elif tool_name == "build_knowledge_graph":
-            if "topic" not in params:
-                params["topic"] = original_query
-            params.setdefault("max_papers", 10)
-            params.setdefault("max_trials", 10)
-        
-        # --- HTTP Call to MCP Server ---
-        payload = {
-            "tool_name": tool_name,
-            "parameters": params
-        }
-        
-        response = requests.post(
-            MCP_TOOL_ENDPOINT,
-            json=payload,
-            timeout=300  # 5 minutes for long operations
-        )
-        response.raise_for_status()
-        
-        # Parse response
-        response_data = response.json()
-        tool_result = response_data.get("result", f"Error: No 'result' key in server response: {response_data}")
-        
-        return {
-            **state,
-            "tool_result": tool_result,
-        }
-        
-    except requests.exceptions.ConnectionError:
-        error_msg = (
-            f"Could not connect to MCP server at {MCP_SERVER_URL}. "
-            "Please ensure the MCP server is running."
-        )
-        return {
-            **state,
-            "error": error_msg,
-            "final_answer": error_msg
-        }
-    
-    except requests.exceptions.HTTPError as err:
-        error_msg = f"HTTP error executing tool: {err}\nServer Response: {response.text}"
-        return {
-            **state,
-            "error": error_msg,
-            "final_answer": error_msg
-        }
-    
-    except Exception as e:
-        error_msg = f"Unexpected error during tool execution: {str(e)}"
-        return {
-            **state,
-            "error": error_msg,
-            "final_answer": error_msg
-        }
-
-
-# --- Node 3: Answer Generation Node ---
-def answer_generation_node(state: GraphState) -> GraphState:
-    """
-    Generates a user-friendly answer from the raw tool result using an LLM.
-    """
-    # Check if there was an error in previous nodes
-    if state.get("error"):
-        return state
-    
-    user_query = state["user_query"]
-    tool_name = state["tool_name"]
-    tool_parameters = state["tool_parameters"]
-    tool_result = state["tool_result"]
-    
-    try:
-        messages = [
-            {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    "User question:\n"
-                    f"{user_query}\n\n"
-                    "Chosen tool:\n"
-                    f"{tool_name}\n\n"
-                    "Tool parameters:\n"
-                    f"{json.dumps(tool_parameters, indent=2)}\n\n"
-                    "Raw tool result (JSON or text):\n"
-                    f"{tool_result}\n\n"
-                    "Please write a clear, coherent answer for the user based ONLY on this data."
-                ),
-            },
-        ]
-        
-        response = chat(
-            model=ANSWER_MODEL,
-            messages=messages,
-            options={"temperature": 0.2},
-        )
-        
-        final_answer = response["message"]["content"]
-        
-        return {
-            **state,
-            "final_answer": final_answer,
-        }
-        
-    except Exception as e:
-        error_msg = f"Error generating final answer: {str(e)}"
-        return {
-            **state,
-            "error": error_msg,
-            "final_answer": error_msg
-        }
+    if next_action == "call_tool":
+        # Check if we have pending tool calls
+        if state.get("tool_calls"):
+            return "tools"
+        else:
+            # Tool results ready, return to agent
+            return "agent"
+    elif next_action == "respond":
+        return "respond"
+    else:
+        return "end"
 
 
 # --- Graph Construction ---
-def create_graph() -> StateGraph:
+def create_agentic_graph() -> StateGraph:
     """
-    Creates and compiles the LangGraph workflow.
+    Create the agentic LangGraph workflow.
     
-    Flow: START → Router → Tool Execution → Answer Generation → END
+    Flow:
+      START → Agent (decide) → Tools (execute) → Agent (synthesize) → Response → END
+                ↓                                      ↑
+                └──────── (if needs more tools) ──────┘
     """
-    # Initialize the graph
-    workflow = StateGraph(GraphState)
+    workflow = StateGraph(AgentState)
     
     # Add nodes
-    workflow.add_node("router", router_node)
-    workflow.add_node("tool_execution", tool_execution_node)
-    workflow.add_node("answer_generation", answer_generation_node)
+    workflow.add_node("agent", agent_node)
+    workflow.add_node("tools", tool_execution_node)
+    workflow.add_node("respond", response_node)
     
-    # Define edges (linear flow)
-    workflow.set_entry_point("router")
-    workflow.add_edge("router", "tool_execution")
-    workflow.add_edge("tool_execution", "answer_generation")
-    workflow.add_edge("answer_generation", END)
+    # Set entry point
+    workflow.set_entry_point("agent")
     
-    # Compile the graph
+    # Add conditional routing
+    workflow.add_conditional_edges(
+        "agent",
+        should_continue,
+        {
+            "agent": "agent",
+            "tools": "tools",
+            "respond": "respond",
+            "end": END
+        }
+    )
+    
+    # Tools always return to agent for synthesis
+    workflow.add_edge("tools", "agent")
+    
+    # Response goes to END
+    workflow.add_edge("respond", END)
+    
     return workflow.compile()
 
 
 # --- Main Execution ---
-if __name__ == "__main__":
+def main():
     print("="*60)
-    print("🧬 Bio-Link Router (LangGraph + Ollama)")
+    print("🧬 Bio-Link Agentic System (LangGraph + MCP)")
     print("="*60)
-    print(f"MCP Server URL: {MCP_SERVER_URL}")
-    print(f"Router Model: {ROUTER_MODEL}")
-    print(f"Answer Model: {ANSWER_MODEL}")
-    print("Type 'quit' or Ctrl+C to exit.\n")
+    print(f"MCP Server: {MCP_SERVER_URL}")
+    print(f"Agent Model: {AGENT_MODEL}")
+    print("Type 'quit' to exit.\n")
     
-    try:
-        # Check MCP server connectivity at startup
+    # Fetch available tools
+    print("📡 Fetching MCP tools...")
+    available_tools = get_mcp_tools()
+    
+    if not available_tools:
+        print("❌ No tools available. Ensure MCP server is running.")
+        sys.exit(1)
+    
+    print(f"✅ Loaded {len(available_tools)} tools:")
+    for tool in available_tools:
+        print(f"   - {tool.get('name')}")
+    print()
+    
+    # Create graph
+    graph = create_agentic_graph()
+    print("✅ LangGraph compiled successfully.\n")
+    print("="*60 + "\n")
+    
+    # Interactive loop
+    while True:
+        user_input = input("User: ").strip()
+        
+        if not user_input:
+            continue
+        
+        if user_input.lower() in ["quit", "exit", "q"]:
+            print("Exiting...")
+            break
+        
         try:
-            requests.get(MCP_SERVER_URL, timeout=5).raise_for_status()
-            print("🟢 MCP Server check: Success.\n")
-        except requests.exceptions.RequestException:
-            print(f"🔴 MCP Server check: FAILED. Ensure server is running at {MCP_SERVER_URL}\n")
-            sys.exit(1)
-        
-        # Create the LangGraph workflow
-        graph = create_graph()
-        print("✅ LangGraph workflow compiled successfully.\n")
-        print("="*60 + "\n")
-        
-        # CLI loop
-        while True:
-            user_q = input("User: ").strip()
+            # Initialize state
+            initial_state = {
+                "messages": [{
+                    "role": "user",
+                    "content": user_input
+                }],
+                "user_query": user_input,
+                "available_tools": available_tools,
+                "next_action": "call_tool",
+                "tool_calls": [],
+                "tool_results": [],
+                "iteration": 0,
+                "max_iterations": 5
+            }
             
-            if not user_q:
-                continue
+            # Run graph
+            print("\n🤖 Agent thinking...\n")
+            result = graph.invoke(initial_state)
             
-            if user_q.lower() in ["quit", "exit", "q"]:
-                print("Exiting router CLI.")
-                break
+            # Extract final answer
+            final_answer = None
+            for msg in reversed(result["messages"]):
+                if msg.get("role") == "final_answer":
+                    final_answer = msg.get("content")
+                    break
             
-            try:
-                # Invoke the graph with initial state
-                initial_state = {
-                    "user_query": user_q,
-                    "tool_name": None,
-                    "tool_parameters": None,
-                    "confidence_score": None,
-                    "reasoning": None,
-                    "tool_result": None,
-                    "final_answer": None,
-                    "error": None,
-                }
-                
-                # Run the graph
-                result = graph.invoke(initial_state)
-                
-                # Display results
-                print("\n" + "="*60)
-                print("[ROUTER DECISION]")
-                print("="*60)
-                print(f"Tool:       {result.get('tool_name', 'N/A')}")
-                print(f"Parameters: {json.dumps(result.get('tool_parameters', {}), indent=2)}")
-                print(f"Confidence: {result.get('confidence_score', 0):.2f}")
-                print(f"Reasoning:  {result.get('reasoning', 'N/A')}")
-                print("="*60 + "\n")
-                
-                # Show raw tool result (debug)
-                print("----- RAW TOOL RESULT (debug) -----")
-                print(result.get("tool_result", "No result"))
-                print("-----------------------------------\n")
-                
-                # Show final answer
-                print("="*60)
-                print("[FINAL ANSWER]")
-                print("="*60)
-                print(result.get("final_answer", "No answer generated"))
-                print("="*60 + "\n")
-                
-                # Show error if any
-                if result.get("error"):
-                    print(f"⚠️  Error occurred: {result['error']}\n")
-                
-            except Exception as e:
-                print(f"\n❌ [ERROR] {e}\n")
-    
-    except KeyboardInterrupt:
-        print("\n\nExiting router CLI.")
+            if not final_answer:
+                # Fallback: get last assistant message
+                for msg in reversed(result["messages"]):
+                    if msg.get("role") == "assistant":
+                        content = msg.get("content", "")
+                        try:
+                            data = json.loads(content) if isinstance(content, str) else content
+                            final_answer = data.get("answer", content)
+                        except:
+                            final_answer = content
+                        break
+            
+            # Display answer
+            print("="*60)
+            print("[AGENT RESPONSE]")
+            print("="*60)
+            print(final_answer or "No response generated")
+            print("="*60)
+            print(f"\n📊 Iterations: {result.get('iteration', 0)}")
+            print(f"🔧 Tool calls made: {len(result.get('tool_results', []))}")
+            print()
+            
+        except KeyboardInterrupt:
+            print("\n\nExiting...")
+            break
+        except Exception as e:
+            print(f"\n❌ Error: {e}\n")
+
+
+if __name__ == "__main__":
+    main()
