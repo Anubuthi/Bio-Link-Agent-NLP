@@ -37,7 +37,7 @@ class TrialsClient:
         
 '''
 
-import requests
+'''import requests
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -210,5 +210,60 @@ class TrialsClient:
                     "locations": locations_struct,
                 }
             )
+
+        return results
+'''
+
+import requests
+from typing import Any, Dict, List, Optional
+
+class TrialsClient:
+    def __init__(self):
+        self.base_url = "https://clinicaltrials.gov/api/v2/studies"
+
+    def search_active_trials(self, condition: str, limit: int = 5) -> List[Dict[str, Any]]:
+        params = {
+            "query.cond": condition,
+            "filter.overallStatus": "RECRUITING",
+            "pageSize": limit,
+            # CRITICAL FIX: Added StatusModule and DesignModule
+            "fields": "NCTId,BriefTitle,EligibilityModule,StatusModule,DesignModule"
+        }
+
+        try:
+            response = requests.get(self.base_url, params=params, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            print(f"Trials Error: {e}")
+            return []
+
+        results = []
+        for study in data.get("studies", []):
+            proto = study.get("protocolSection", {}) or {}
+            identity = proto.get("identificationModule", {})
+            eligibility = proto.get("eligibilityModule", {})
+            
+            # New Modules for Graph Metadata
+            status_mod = proto.get("statusModule", {})
+            design_mod = proto.get("designModule", {})
+
+            # Extract Fields
+            nct_id = identity.get("nctId")
+            title = identity.get("briefTitle") or "No Title"
+            criteria = eligibility.get("eligibilityCriteria", "")
+            
+            # Extract Status & Phase
+            overall_status = status_mod.get("overallStatus", "Unknown")
+            phases = ", ".join(design_mod.get("phases", ["Not Listed"]))
+
+            results.append({
+                "nct_id": nct_id,
+                "title": title,
+                "criteria": criteria,
+                "status": overall_status, # <--- NEW
+                "phase": phases,          # <--- NEW
+                "type": "Trial"
+            })
 
         return results

@@ -55,7 +55,7 @@ class PubMedClient:
             print(f"PubMed Error: {e}")
             return []
             '''
-import os
+'''import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -247,3 +247,73 @@ class PubMedClient:
                 }
             )
         return minimal
+'''
+
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+from dotenv import load_dotenv
+from Bio import Entrez
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+ENV_PATH = PROJECT_ROOT / ".env"
+load_dotenv(ENV_PATH)
+
+class PubMedClient:
+    def __init__(self, email: Optional[str] = None):
+        self.email = email or os.getenv("PUBMED_EMAIL") or "your.email@example.com"
+        Entrez.email = self.email
+
+    def _parse_article(self, article: Dict[str, Any]) -> Dict[str, Any]:
+        citation = article.get("MedlineCitation", {})
+        article_data = citation.get("Article", {})
+        pmid = str(citation.get("PMID", ""))
+
+        # Title
+        title = str(article_data.get("ArticleTitle", "No Title"))
+
+        # Journal
+        journal_data = article_data.get("Journal", {}) or {}
+        journal = journal_data.get("Title") or ""
+
+        # Date Parsing (Graph expects 'date')
+        pub_date = journal_data.get("JournalIssue", {}).get("PubDate", {}) or {}
+        date_str = str(pub_date.get("Year") or pub_date.get("MedlineDate") or "Unknown")
+
+        # Abstract
+        abstract_obj = article_data.get("Abstract", {}) or {}
+        abstract_elems = abstract_obj.get("AbstractText", []) or []
+        
+        # Flatten abstract list
+        if isinstance(abstract_elems, list):
+            abstract_text = " ".join([str(x) for x in abstract_elems])
+        else:
+            abstract_text = str(abstract_elems)
+
+        return {
+            "id": pmid,
+            "title": title,
+            "abstract": abstract_text,
+            "journal": journal,
+            "date": date_str,  # <--- CRITICAL FIX: Graph expects 'date'
+            "type": "Paper"
+        }
+
+    def fetch_research(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
+        try:
+            # Sort by date to get recent research
+            search_handle = Entrez.esearch(db="pubmed", term=query, retmax=max_results, sort="date")
+            search_record = Entrez.read(search_handle)
+            ids = search_record.get("IdList", [])
+
+            if not ids: return []
+
+            fetch_handle = Entrez.efetch(db="pubmed", id=",".join(ids), rettype="xml", retmode="xml")
+            fetch_record = Entrez.read(fetch_handle)
+            articles = fetch_record.get("PubmedArticle", []) or []
+
+            return [self._parse_article(art) for art in articles]
+        except Exception as e:
+            print(f"PubMed Error: {e}")
+            return []
+        
