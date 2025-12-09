@@ -13,6 +13,7 @@ from src.server import (
     search_trials,
     match_trials_semantic,
     build_knowledge_graph,
+    search_knowledge_graph,
 )
 
 
@@ -78,6 +79,7 @@ def execute_tool(
         "search_trials": search_trials,
         "match_trials_semantic": match_trials_semantic,
         "build_knowledge_graph": build_knowledge_graph,
+        "search_knowledge_graph": search_knowledge_graph,
     }
 
     if selection.tool_name not in tool_map:
@@ -134,6 +136,9 @@ def execute_tool(
             params["topic"] = original_query
         params.setdefault("max_papers", 10)
         params.setdefault("max_trials", 10)
+
+    print(f"\n🚀 [DEBUG] ROUTER SELECTED: {selection.tool_name}")
+    print(f"📦 [DEBUG] PARAMS: {params}\n")
 
     # Finally, call the underlying tool function
     return tool_fn(**params)

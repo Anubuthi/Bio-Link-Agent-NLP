@@ -397,3 +397,43 @@ class KnowledgeGraphEngine:
                     })
                     
         return nodes, edges
+    def query_graph(self, query: str) -> str:
+        """
+        Retrieves related entities and relationships from the graph 
+        based on keywords in the user query.
+        """
+        # 1. Extract potential entities from the query using your existing NLP pipeline
+        nlp_data = self.analyze_text(query)
+        entities = [e['name'] for e in nlp_data['entities']]
+        
+        # Fallback: If no entities found, use the whole query as a keyword
+        if not entities:
+            keywords = [query]
+        else:
+            keywords = entities
+
+        context_lines = []
+        with self.driver.session() as session:
+            for term in keywords:
+                # Cypher query: Find nodes matching the term and their immediate neighbors
+                # We limit to 10 relationships per term to prevent context window overflow
+                cypher = """
+                MATCH (n)-[r]-(m)
+                WHERE n.name =~ '(?i).*' + $term + '.*' OR n.title =~ '(?i).*' + $term + '.*'
+                RETURN n.name AS source, type(r) AS rel, m.name AS target, m.title AS target_title
+                LIMIT 10
+                """
+                result = session.run(cypher, term=term)
+                
+                for record in result:
+                    src = record['source'] or "Unknown"
+                    rel = record['rel']
+                    # Use title if it's a paper/trial, otherwise name
+                    tgt = record['target_title'] or record['target'] or "Unknown"
+                    context_lines.append(f"- {src} {rel} {tgt}")
+
+        if not context_lines:
+            return "No specific graph knowledge found for this query."
+            
+        # Deduplicate and return
+        return "Knowledge Graph Relationships:\n" + "\n".join(list(set(context_lines)))

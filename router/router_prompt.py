@@ -89,6 +89,16 @@ AVAILABLE TOOLS (Python functions):
    - If the user says they ONLY want literature / papers / research,
      then set include_trials to false and you may set max_trials to 0.
 
+6) search_knowledge_graph(query: str) -> str
+   - Queries the internal Neo4j graph for structured, multi-hop relationships.
+   - Use this tool when the user asks about specific biological CONNECTIONS, MECHANISMS, or TARGETS.
+   - TRIGGERS: "relationship between", "how does X affect Y", "mechanism of action", "what drugs target X", "pathways involved in".
+   - This tool retrieves facts like: (Drug)-[TARGETS]->(Gene) or (Trial)-[TESTS]->(Drug).
+   - DO NOT use for "latest news" or "recent updates" (use search_medical_data).
+   - DO NOT use for "build me a graph" or "visualize" (use build_knowledge_graph).
+   - REQUIRED parameter:
+     - query (string) = The core entities to search for (e.g., "EGFR inhibitors", "Glioblastoma pathways"). 
+       Strip out filler words like "tell me about" or "search for".
 
 CRITICAL RULES:
 - You MUST choose exactly ONE tool.

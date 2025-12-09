@@ -318,6 +318,21 @@ def build_knowledge_graph(
     except Exception as e:
         return f"Error in build_knowledge_graph: {str(e)}"
 
+@mcp.tool()
+def search_knowledge_graph(query: str) -> str:
+    """
+    Queries the internal Neo4j Knowledge Graph to find structured relationships 
+    between diseases, drugs, papers, and trials.
+    
+    Use this when the user asks about connections, mechanisms, or relationships 
+    (e.g. "What drugs target EGFR?" or "relationships between glioblastoma and immunotherapies").
+    """
+    try:
+        sys.stderr.write(f"DEBUG: search_knowledge_graph query={query}\n")
+        return kg_engine.query_graph(query)
+    except Exception as e:
+        return f"Error querying graph: {str(e)}"
+
 
 if __name__ == "__main__":
     mcp.run()
