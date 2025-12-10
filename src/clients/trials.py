@@ -212,3 +212,77 @@ class TrialsClient:
             )
 
         return results
+    
+    def search_trials(
+        self, condition: str, limit: int = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetches recruiting trials with key eligibility fields:
+        - NCT ID
+        - Title
+        - Inclusion/exclusion criteria
+        - Age range (min/max, raw + parsed)
+        - Sex eligibility
+        - Locations (countries, cities, site list)
+        """
+        params = {
+            "query.cond": condition,
+            "pageSize": limit,
+            # Request full modules so we can pull nested fields
+            "fields": "NCTId,BriefTitle,EligibilityModule,ContactsLocationsModule",
+        }
+
+        try:
+            response = requests.get(self.base_url, params=params, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            print(f"Trials Error (request): {e}")
+            return []
+
+        results: List[Dict[str, Any]] = []
+
+        for study in data.get("studies", []):
+            protocol = study.get("protocolSection", {}) or {}
+
+            # --- Identification ---
+            identity = protocol.get("identificationModule", {}) or {}
+            nct_id = identity.get("nctId")
+            title = identity.get("briefTitle") or identity.get("officialTitle") or "No Title"
+
+            # --- Eligibility ---
+            eligibility = protocol.get("eligibilityModule", {}) or {}
+            criteria_text = eligibility.get("eligibilityCriteria", "") or ""
+
+            min_age_raw = eligibility.get("minimumAge")
+            max_age_raw = eligibility.get("maximumAge")
+            sex = eligibility.get("sex") or "ALL"  # typical values: "ALL", "FEMALE", "MALE"
+
+            min_age_years = self._parse_age_to_years(min_age_raw)
+            max_age_years = self._parse_age_to_years(max_age_raw)
+
+            age_struct = {
+                "min": min_age_years,
+                "max": max_age_years,
+                "min_raw": min_age_raw,
+                "max_raw": max_age_raw,
+            }
+
+            # --- Locations ---
+            contacts_block = protocol.get("contactsLocationsModule", {}) or {}
+            locations_struct = self._extract_locations(contacts_block)
+
+            # --- Final unified record ---
+            results.append(
+                {
+                    "source": "ClinicalTrials.gov",
+                    "nct_id": nct_id,
+                    "title": title,
+                    "criteria": criteria_text,
+                    "age": age_struct,
+                    "sex": sex,
+                    "locations": locations_struct,
+                }
+            )
+
+        return results

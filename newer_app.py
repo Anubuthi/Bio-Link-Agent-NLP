@@ -251,21 +251,29 @@ def wrap_label(text: str, width: int = 18) -> str:
 # MAIN TABS
 # ======================
 
-# Initialize active tab in session state
-if 'active_tab' not in st.session_state:
-    st.session_state.active_tab = "🩺 Patient Matcher"
-
-# Create tabs
-tab1, tab2, tab3 = st.tabs([
+TAB_LABELS = [
     "🩺 Patient Matcher",
     "🔬 Knowledge Graph",
-    "🤖 Agentic Q&A (LangGraph)"
-])
+    "🤖 Agentic Q&A (LangGraph)",
+]
 
+if "active_tab" not in st.session_state:
+    st.session_state.active_tab = TAB_LABELS[0]
+
+# Radio to control which section is visible
+selected_tab = st.radio(
+    "Navigation",
+    TAB_LABELS,
+    index=TAB_LABELS.index(st.session_state.active_tab),
+    horizontal=True,
+    key="nav_tabs",
+)
+
+st.session_state.active_tab = selected_tab
 # ==========================================
 # TAB 1: PATIENT MATCHER
 # ==========================================
-with tab1:
+if st.session_state.active_tab == "🩺 Patient Matcher":
     st.header("🩺 Precision Patient Matching")
     st.info("📋 Use semantic vector search to match patient profiles with active clinical trials")
     
@@ -348,7 +356,7 @@ def shorten_label(text: str, max_chars: int = 16) -> str:
         return text
     return text[: max_chars - 3] + "..."
 
-with tab2:
+if st.session_state.active_tab == "🔬 Knowledge Graph":
     st.header("Strategic Research Landscape")
     st.info("Visualizing the gap between Published Literature (Red) and Clinical Trials (Green).")
     
@@ -478,7 +486,7 @@ with tab2:
 # ==========================================
 # TAB 3: AGENTIC Q&A (LANGGRAPH)
 # ==========================================
-with tab3:
+if st.session_state.active_tab == "🤖 Agentic Q&A (LangGraph)":
     st.header("🤖 Agentic Biomedical Q&A")
     st.info("🧠 Ask complex questions. The LangGraph agent will reason, call multiple tools, and synthesize comprehensive answers.")
     
@@ -674,11 +682,12 @@ with tab3:
                             except:
                                 final_answer = content
                             break
-                
+                tool_results = result.get("tool_results", []) or []
                 # Store results
-                st.session_state['agent_answer'] = final_answer or "No response generated"
-                st.session_state['agent_iterations'] = result.get('iteration', 0)
-                st.session_state['agent_tool_calls'] = len(result.get('tool_results', []))
+                st.session_state["agent_answer"] = final_answer or "No response generated"
+                st.session_state["agent_iterations"] = result.get("iteration", 0)
+                st.session_state["agent_tool_calls"] = len(tool_results)
+                st.session_state["agent_tool_results"] = tool_results
                 
                 status.update(label="✅ Agent completed!", state="complete", expanded=False)
                 
@@ -702,7 +711,7 @@ with tab3:
         with col4:
             # Add clear button in metrics row
             if st.button("🗑️ Clear", key="btn_clear_results", help="Clear results"):
-                for key in ['agent_answer', 'agent_iterations', 'agent_tool_calls']:
+                for key in ["agent_answer", "agent_iterations", "agent_tool_calls", "agent_tool_results"]:
                     st.session_state.pop(key, None)
 
         
@@ -713,11 +722,28 @@ with tab3:
         
         # Debug info
         with st.expander("🔍 Debug Information"):
-            st.json({
-                "iterations": st.session_state.get('agent_iterations', 0),
-                "tool_calls": st.session_state.get('agent_tool_calls', 0),
-                "query": user_query
-            })
+            tool_results = st.session_state.get("agent_tool_results", [])
+
+            # Make a nicer, readable structure for tools
+            tools_pretty = []
+            for i, tr in enumerate(tool_results, start=1):
+                tools_pretty.append(
+                    {
+                        "index": i,
+                        "tool": tr.get("tool_name") or tr.get("name") or tr.get("tool", "unknown_tool"),
+                        "input": tr.get("input") or tr.get("args") or tr.get("request"),
+                        "output": tr.get("output") or tr.get("result") or tr.get("response"),
+                    }
+                )
+
+            st.json(
+                {
+                    "iterations": st.session_state.get("agent_iterations", 0),
+                    "tool_calls": st.session_state.get("agent_tool_calls", 0),
+                    "query": user_query,
+                    "tools": tools_pretty,
+                }
+            )
 
 # ======================
 # SIDEBAR

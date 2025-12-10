@@ -174,7 +174,7 @@ def search_clinical_trials(
         }
     """
     try:
-        all_trials = trials.search_active_trials(condition, limit=limit * 2)
+        all_trials = trials.search_trials(condition, limit=limit * 2)
         
         # Apply country filter
         if country:
@@ -333,7 +333,7 @@ def build_knowledge_graph(
         papers = pubmed.fetch_research(topic, max_results=max_papers)
         
         if include_trials and max_trials > 0:
-            active_trials = trials.search_active_trials(topic, limit=max_trials)
+            active_trials = trials.search_trials(topic, limit=max_trials)
         else:
             active_trials = []
         
@@ -379,7 +379,7 @@ def synthesize_research_landscape(
     """
     try:
         papers = pubmed.fetch_research(topic, max_results=max_papers)
-        active_trials = trials.search_active_trials(topic, limit=max_trials)
+        active_trials = trials.search_trials(topic, limit=max_trials)
         
         return {
             "topic": topic,

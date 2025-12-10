@@ -161,7 +161,7 @@ def search_clinical_trials(
         phase: Optional phase filter (e.g., "Phase 2")
     """
     try:
-        all_trials = trials.search_active_trials(condition, limit=limit * 2)
+        all_trials = trials.search_trials(condition, limit=limit * 2)
         
         if country:
             country_norm = country.strip().lower()
@@ -272,7 +272,7 @@ def build_knowledge_graph(
         papers = pubmed.fetch_research(topic, max_results=max_papers)
         
         if include_trials and max_trials > 0:
-            active_trials = trials.search_active_trials(topic, limit=max_trials)
+            active_trials = trials.search_trials(topic, limit=max_trials)
         else:
             active_trials = []
         
@@ -306,7 +306,7 @@ def synthesize_research_landscape(
     """
     try:
         papers = pubmed.fetch_research(topic, max_results=max_papers)
-        active_trials = trials.search_active_trials(topic, limit=max_trials)
+        active_trials = trials.search_trials(topic, limit=max_trials)
         
         return {
             "topic": topic,
