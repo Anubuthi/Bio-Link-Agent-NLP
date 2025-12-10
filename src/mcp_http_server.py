@@ -323,6 +323,21 @@ def synthesize_research_landscape(
         return {"error": str(e), "topic": topic}
 
 
+def search_knowledge_graph(query: str) -> str:
+    """
+    Queries the internal Neo4j Knowledge Graph to find structured relationships 
+    between diseases, drugs, papers, and trials.
+    
+    Use this when the user asks about connections, mechanisms, or relationships 
+    (e.g. "What drugs target EGFR?" or "relationships between glioblastoma and immunotherapies").
+    """
+    try:
+        sys.stderr.write(f"DEBUG: search_knowledge_graph query={query}\n")
+        return kg_engine.query_graph(query)
+    except Exception as e:
+        return f"Error querying graph: {str(e)}"
+
+
 # --- TOOL REGISTRY ---
 TOOL_REGISTRY = {
     "search_pubmed": search_pubmed,
@@ -330,6 +345,7 @@ TOOL_REGISTRY = {
     "match_patient_to_trials": match_patient_to_trials,
     "build_knowledge_graph": build_knowledge_graph,
     "synthesize_research_landscape": synthesize_research_landscape,
+    "search_knowledge_graph": search_knowledge_graph,
 }
 
 

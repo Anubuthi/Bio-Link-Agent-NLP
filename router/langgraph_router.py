@@ -16,7 +16,7 @@ from langgraph.prebuilt import ToolNode
 MCP_SERVER_URL = "http://127.0.0.1:8005"
 MCP_TOOLS_LIST_ENDPOINT = f"{MCP_SERVER_URL}/tools/list"
 MCP_TOOL_CALL_ENDPOINT = f"{MCP_SERVER_URL}/tools/call"
-AGENT_MODEL = "qwen2.5:7b"  # Larger model for better reasoning
+AGENT_MODEL = "qwen2.5:3b"  # Larger model for better reasoning
 # ---------------------
 
 
@@ -73,13 +73,30 @@ When you're ready to answer, respond with JSON:
   "confidence": 0.9
 }}
 
+ANSWER FORMATTING GUIDELINES:
+When writing your "answer" field, follow these rules:
+- Start with a short high-level summary (2-4 sentences)
+- Then add bullet points with key findings:
+  - Important drugs, targets, pathways from papers
+  - Notable trials with NCT IDs, phase, intervention, population
+  - Important limitations or uncertainties
+- Use Markdown formatting:
+  - "### Summary" for overview
+  - "### Key Papers" for research findings
+  - "### Notable Trials" for clinical trials
+- ONLY use information that appears in the tool results - DO NOT hallucinate
+- Cite sources: PMIDs for papers (e.g., PMID: 12345678), NCT IDs for trials (e.g., NCT12345678)
+- If data is sparse or limited, say so clearly
+- Keep it concise but informative
+
 GUIDELINES:
 - Use specific, detailed queries for tools (not vague terms)
 - For patient matching, use match_patient_to_trials with full clinical details
 - For research mechanisms, use search_pubmed
 - For trial availability, use search_clinical_trials
 - For comprehensive overviews, call BOTH search_pubmed and search_clinical_trials
-- For knowledge graphs, only use build_knowledge_graph when explicitly requested
+- For knowledge graphs, use build_knowledge_graph when explicitly requested
+- For querying EXISTING graphs, use search_knowledge_graph  
 - Always explain your reasoning
 - Be concise but thorough
 - Cite sources when possible (PMIDs, NCT IDs)
